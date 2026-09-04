@@ -10,12 +10,11 @@ ARG IS_FOLDER
 ARG APICTL_URL_ARM64
 ARG APICTL_URL_X64
 ARG IS_PORT_OFFSET
-ARG APIM_PORT_OFFSET
+
 # Exportar nombres de carpetas y offset para que el script start.sh los pueda usar
 ENV APIM_FOLDER=${APIM_FOLDER}
 ENV IS_FOLDER=${IS_FOLDER}
-ENV IS_PORT_OFFSET=${IS_PORT_OFFSET:-3}
-ENV APIM_PORT_OFFSET=${APIM_PORT_OFFSET:-0}
+ENV IS_PORT_OFFSET=${IS_PORT_OFFSET}
 
 # Dependencias base (+ Python)
 RUN apt-get update && apt-get install -y \
@@ -32,16 +31,17 @@ RUN apt-get update && apt-get install -y \
     netcat \
  && rm -rf /var/lib/apt/lists/*
 
-# Temurin OpenJDK 21
+# Temurin OpenJDK 21 (Arreglo Multi-Arquitectura Mac/Linux)
 RUN mkdir -p /etc/apt/keyrings \
  && wget -O /etc/apt/keyrings/adoptium.asc https://packages.adoptium.net/artifactory/api/gpg/key/public \
  && echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \
     > /etc/apt/sources.list.d/adoptium.list \
  && apt-get update \
  && apt-get install -y temurin-21-jdk \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/lib/jvm/temurin-21-jdk-* /usr/lib/jvm/java-temurin
 
-ENV JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-arm64
+ENV JAVA_HOME=/usr/lib/jvm/java-temurin
 ENV PATH=$JAVA_HOME/bin:$PATH
 
 WORKDIR /opt
@@ -157,18 +157,17 @@ EOF
 RUN cat <<'EOF' > /opt/start.sh
 #!/bin/bash
 MODE=${1:-apim}
-APIM_PORT=$((9443 + APIM_PORT_OFFSET))
 
 echo "=========================================="
 echo " INICIANDO CONTENEDOR EN MODO: $MODE"
-echo " PUERTO BASE APIM CALCULADO: $APIM_PORT"
 echo "=========================================="
 
 # 1. Lógica de arranque de servicios base
 if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
-    echo ">> Iniciando WSO2 API Manager con portOffset=${APIM_PORT_OFFSET}..."
-    sh /opt/${APIM_FOLDER}/bin/api-manager.sh start -DportOffset=${APIM_PORT_OFFSET}
+    echo ">> Iniciando WSO2 API Manager en background..."
+    sh /opt/${APIM_FOLDER}/bin/api-manager.sh start
 fi
+
 if [ "$MODE" = "is" ]; then
     echo ">> Iniciando WSO2 Identity Server (Puerto Default 9443)..."
     sh /opt/${IS_FOLDER}/bin/wso2server.sh start
@@ -179,15 +178,15 @@ fi
 
 # 2. Lógica de automatización (Aplica solo si APIM está encendido)
 if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
-    echo ">> Esperando a que el servidor APIM levante en el puerto $APIM_PORT..."
-    while ! nc -z localhost $APIM_PORT; do sleep 5; done
+    echo ">> Esperando a que el servidor APIM levante en el puerto 9443..."
+    while ! nc -z localhost 9443; do sleep 5; done
     
-    echo ">> Puerto $APIM_PORT disponible. Esperando 45 segundos para inicialización interna..."
+    echo ">> Puerto 9443 disponible. Esperando 45 segundos para inicialización interna..."
     sleep 45
 
     echo "--- Generando Token REST API Nativo ---"
     B64_CRED=$(echo -n "admin:admin" | base64)
-        DCR_RESPONSE=$(curl -k -s -X POST https://localhost:${APIM_PORT}/client-registration/v0.17/register \
+    DCR_RESPONSE=$(curl -k -s -X POST https://localhost:9443/client-registration/v0.17/register \
       -H "Authorization: Basic $B64_CRED" \
       -H "Content-Type: application/json" \
       -d '{"callbackUrl":"www.google.lk","clientName":"rest_api_client","owner":"admin","grantType":"password refresh_token","saasApp":true}')
@@ -195,21 +194,21 @@ if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
     CLIENT_SECRET=$(echo $DCR_RESPONSE | jq -r .clientSecret)
     B64_APP=$(echo -n "$CLIENT_ID:$CLIENT_SECRET" | base64)
 
-    TOKEN_RESPONSE=$(curl -k -s -X POST https://localhost:${APIM_PORT}/oauth2/token \
+    TOKEN_RESPONSE=$(curl -k -s -X POST https://localhost:9443/oauth2/token \
       -H "Authorization: Basic $B64_APP" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       -d "grant_type=password&username=admin&password=admin&scope=apim:api_create apim:api_view apim:api_publish apim:app_manage apim:sub_manage apim:subscribe apim:mcp_server_view apim:mcp_server_create apim:mcp_server_manage apim:mcp_server_publish")
     TOKEN=$(echo $TOKEN_RESPONSE | jq -r .access_token)
 
-    apictl add env dev --apim https://localhost:${APIM_PORT}
+    apictl add env dev --apim https://localhost:9443
     apictl login dev -u admin -p admin -k
 
     echo "--- 1. Creando Consumidor (AutoTestApp) ---"
-    APP_ID=$(curl -k -s -X GET "https://localhost:${APIM_PORT}/api/am/devportal/v3/applications?query=name:DefaultApplication" -H "Authorization: Bearer $TOKEN" | jq -r '.list[]? | select(.name == "DefaultApplication") | .applicationId' | head -n 1)
+    APP_ID=$(curl -k -s -X GET "https://localhost:9443/api/am/devportal/v3/applications?query=name:DefaultApplication" -H "Authorization: Bearer $TOKEN" | jq -r '.list[]? | select(.name == "DefaultApplication") | .applicationId' | head -n 1)
 
     if [ "$APP_ID" == "null" ] || [ -z "$APP_ID" ]; then
         echo ">> DefaultApplication no encontrada. Creandola..."
-        APP_RESPONSE=$(curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/devportal/v3/applications" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"name":"DefaultApplication","throttlingPolicy":"Unlimited","description":"App por defecto para pruebas"}')
+        APP_RESPONSE=$(curl -k -s -X POST "https://localhost:9443/api/am/devportal/v3/applications" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"name":"DefaultApplication","throttlingPolicy":"Unlimited","description":"App por defecto para pruebas"}')
         APP_ID=$(echo $APP_RESPONSE | jq -r '.applicationId')
         sleep 2
     fi
@@ -232,7 +231,7 @@ if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
             RETRIES=0
             while [ "$API_ID" == "null" ] && [ $RETRIES -lt 15 ]; do
                 sleep 2
-                API_JSON=$(curl -k -s -X GET "https://localhost:${APIM_PORT}/api/am/publisher/v4/apis?query=name:$api_name" -H "Authorization: Bearer $TOKEN")
+                API_JSON=$(curl -k -s -X GET "https://localhost:9443/api/am/publisher/v4/apis?query=name:$api_name" -H "Authorization: Bearer $TOKEN")
                 API_ID=$(echo "$API_JSON" | jq -r '.list[0].id // "null"')
                 RETRIES=$((RETRIES+1))
             done
@@ -241,21 +240,21 @@ if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
             
             if [ "$API_ID" != "null" ] && [ ! -z "$API_ID" ]; then
                 echo ">> Configurando Mock (INLINE) y Políticas para la API..."
-                curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/publisher/v4/apis/$API_ID/generate-mock-scripts" -H "Authorization: Bearer $TOKEN" > /dev/null
-                API_FULL=$(curl -k -s -X GET "https://localhost:${APIM_PORT}/api/am/publisher/v4/apis/$API_ID" -H "Authorization: Bearer $TOKEN")
+                curl -k -s -X POST "https://localhost:9443/api/am/publisher/v4/apis/$API_ID/generate-mock-scripts" -H "Authorization: Bearer $TOKEN" > /dev/null
+                API_FULL=$(curl -k -s -X GET "https://localhost:9443/api/am/publisher/v4/apis/$API_ID" -H "Authorization: Bearer $TOKEN")
                 UPDATED_API=$(echo "$API_FULL" | jq '.endpointImplementationType = "INLINE" | .policies = ["Unlimited"] | del(.authorizationHeader, .securityScheme, .corsConfiguration)')
-                curl -k -s -X PUT "https://localhost:${APIM_PORT}/api/am/publisher/v4/apis/$API_ID" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "$UPDATED_API" > /dev/null
+                curl -k -s -X PUT "https://localhost:9443/api/am/publisher/v4/apis/$API_ID" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "$UPDATED_API" > /dev/null
                 
                 echo ">> Desplegando y Publicando API base..."
                 apictl create api-revision -a "$api_name" -v "$api_version" -e dev -k > /dev/null 2>&1 || true
                 apictl deploy api-revision -a "$api_name" -v "$api_version" --rev 1 -g Default -e dev -k > /dev/null 2>&1 || true
-                curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/publisher/v4/apis/change-lifecycle?apiId=$API_ID&action=Publish" -H "Authorization: Bearer $TOKEN" > /dev/null
+                curl -k -s -X POST "https://localhost:9443/api/am/publisher/v4/apis/change-lifecycle?apiId=$API_ID&action=Publish" -H "Authorization: Bearer $TOKEN" > /dev/null
 
                 echo ">> Dando tiempo al DevPortal para indexar la API..."
                 sleep 4
 
                 echo ">> Suscribiendo aplicación a la API base..."
-                SUB_API_RESP=$(curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/devportal/v3/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"applicationId\":\"$APP_ID\",\"apiId\":\"$API_ID\",\"throttlingPolicy\":\"Unlimited\"}")
+                SUB_API_RESP=$(curl -k -s -X POST "https://localhost:9443/api/am/devportal/v3/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"applicationId\":\"$APP_ID\",\"apiId\":\"$API_ID\",\"throttlingPolicy\":\"Unlimited\"}")
                 
                 echo ">> Generando e Importando MCP Server (LLM Tools)..."
                 cd /opt
@@ -268,25 +267,25 @@ if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
                 MCP_RETRIES=0
                 while [ "$MCP_ID" == "null" ] && [ $MCP_RETRIES -lt 15 ]; do
                     sleep 2
-                    MCP_JSON=$(curl -k -s -X GET "https://localhost:${APIM_PORT}/api/am/publisher/v4/mcp-servers?query=name:MCP_$api_name" -H "Authorization: Bearer $TOKEN")
+                    MCP_JSON=$(curl -k -s -X GET "https://localhost:9443/api/am/publisher/v4/mcp-servers?query=name:MCP_$api_name" -H "Authorization: Bearer $TOKEN")
                     MCP_ID=$(echo "$MCP_JSON" | jq -r '.list[0].id // "null"')
                     MCP_RETRIES=$((MCP_RETRIES+1))
                 done
 
                 if [ "$MCP_ID" != "null" ] && [ "$MCP_ID" != "" ]; then
                     echo ">> MCP Encontrado ($MCP_ID). Forzando despliegue en Gateway..."
-                    REV_RESP=$(curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/publisher/v4/mcp-servers/$MCP_ID/revisions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"description":"AutoDeploy"}')
+                    REV_RESP=$(curl -k -s -X POST "https://localhost:9443/api/am/publisher/v4/mcp-servers/$MCP_ID/revisions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"description":"AutoDeploy"}')
                     REV_ID=$(echo "$REV_RESP" | jq -r '.id // empty')
                     
                     if [ ! -z "$REV_ID" ]; then
-                        curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/publisher/v4/mcp-servers/$MCP_ID/deploy-revision?revisionId=$REV_ID" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '[{"name":"Default","vhost":"localhost","displayOnDevportal":true}]' > /dev/null
+                        curl -k -s -X POST "https://localhost:9443/api/am/publisher/v4/mcp-servers/$MCP_ID/deploy-revision?revisionId=$REV_ID" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '[{"name":"Default","vhost":"localhost","displayOnDevportal":true}]' > /dev/null
                     fi
 
                     echo ">> Dando tiempo al DevPortal para indexar el MCP..."
                     sleep 4
 
                     echo ">> Suscribiendo aplicación al MCP..."
-                    SUB_MCP_RESP=$(curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/devportal/v3/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"applicationId\":\"$APP_ID\",\"apiId\":\"$MCP_ID\",\"throttlingPolicy\":\"Unlimited\"}")
+                    SUB_MCP_RESP=$(curl -k -s -X POST "https://localhost:9443/api/am/devportal/v3/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"applicationId\":\"$APP_ID\",\"apiId\":\"$MCP_ID\",\"throttlingPolicy\":\"Unlimited\"}")
                 else
                      echo ">> ERROR: Timeout esperando la indexación del MCP."
                 fi
@@ -300,13 +299,13 @@ if [ "$MODE" = "apim" ] || [ "$MODE" = "is-apim" ]; then
 
     echo "--- 3. Generando Claves de Produccion y Sandbox ---"
     if [ "$APP_ID" != "null" ] && [ ! -z "$APP_ID" ]; then
-        PROD_RESPONSE=$(curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/devportal/v3/applications/$APP_ID/generate-keys" \
+        PROD_RESPONSE=$(curl -k -s -X POST "https://localhost:9443/api/am/devportal/v3/applications/$APP_ID/generate-keys" \
           -H "Authorization: Bearer $TOKEN" \
           -H "Content-Type: application/json" \
           -d '{"keyType":"PRODUCTION","grantTypesToBeSupported":["client_credentials","password"],"validityTime":"360000"}')
         PROD_TOKEN=$(echo $PROD_RESPONSE | jq -r '.token.accessToken')
 
-        SANDBOX_RESPONSE=$(curl -k -s -X POST "https://localhost:${APIM_PORT}/api/am/devportal/v3/applications/$APP_ID/generate-keys" \
+        SANDBOX_RESPONSE=$(curl -k -s -X POST "https://localhost:9443/api/am/devportal/v3/applications/$APP_ID/generate-keys" \
           -H "Authorization: Bearer $TOKEN" \
           -H "Content-Type: application/json" \
           -d '{"keyType":"SANDBOX","grantTypesToBeSupported":["client_credentials","password"],"validityTime":"360000"}')
