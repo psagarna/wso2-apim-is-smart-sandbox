@@ -1,0 +1,34 @@
+services:
+  apim:
+    image: wso2-apim:4.6.0-jdk21
+    build: 
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - APIM_URL=${APIM_URL}
+        - APIM_FOLDER=${APIM_FOLDER}
+        - IS_URL=${IS_URL}
+        - IS_FOLDER=${IS_FOLDER}
+        - APICTL_URL_ARM64=${APICTL_URL_ARM64}
+        - APICTL_URL_X64=${APICTL_URL_X64}
+        - IS_PORT_OFFSET=${IS_PORT_OFFSET:-3}
+        - APIM_PORT_OFFSET=${APIM_PORT_OFFSET:-0}
+    
+    environment:
+      - APIM_PORT_OFFSET=${APIM_PORT_OFFSET:-0}
+      - IS_PORT_OFFSET=${IS_PORT_OFFSET:-3}
+    
+    ports:
+      - "${APIM_PORT}:${APIM_PORT}"
+      - "${APIM_MGM_HTTP}:${APIM_MGM_HTTP}"
+      - "${APIM_GW_HTTPS}:${APIM_GW_HTTPS}"
+      - "${APIM_GW_HTTP}:${APIM_GW_HTTP}"
+      - "${IS_PORT}:${IS_PORT}"
+    command: ["${WSO2_MODE:-apim}"] 
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost $$((9443 + $${APIM_PORT_OFFSET:-0}))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - ./src/openapi:/opt/src/openapi
